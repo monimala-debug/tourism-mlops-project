@@ -1,0 +1,16 @@
+# Generated train/test splits - passed between jobs as a workflow artifact, never committed
+tourism_project/data/splits/
+# Registration reports, MLflow tracking DB and artifacts (uploaded as workflow artifacts)
+tourism_project/outputs/
+mlruns/
+mlartifacts/
+*.db
+# Colab-only development outputs
+local_run/
+# Python / notebook clutter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+# Never commit secrets
+.env
+*.pem

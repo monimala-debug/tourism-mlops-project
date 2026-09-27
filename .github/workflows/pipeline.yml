@@ -1,0 +1,143 @@
+name: Tourism Project Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    # A push that ONLY changes the trained model does not start a new run.
+    # (Second safety net; the bot's commit message also carries [skip ci].)
+    paths-ignore:
+      - "tourism_project/deployment/model.joblib"
+  workflow_dispatch: # "Run workflow" button in the Actions tab
+
+permissions:
+  contents: write # lets the built-in GITHUB_TOKEN commit model.joblib back to main
+
+# Never run two pipelines on the same branch at once (avoids racing model commits).
+concurrency:
+  group: tourism-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  MLFLOW_DISABLE_AGENT_HINT: "1"
+
+jobs:
+  register-dataset:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tourism_project/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tourism_project/requirements.txt
+
+      - name: Register and validate dataset
+        run: python tourism_project/model_building/data_register.py
+
+      - name: Upload registration summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-registration-summary
+          path: tourism_project/outputs/registration/registration_summary.json
+          if-no-files-found: error
+          retention-days: 14
+
+  data-prep:
+    needs: register-dataset
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tourism_project/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tourism_project/requirements.txt
+
+      - name: Run data preparation
+        run: python tourism_project/model_building/prep.py
+
+      - name: Upload train/test splits
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-splits
+          path: |
+            tourism_project/data/splits/Xtrain.csv
+            tourism_project/data/splits/Xtest.csv
+            tourism_project/data/splits/ytrain.csv
+            tourism_project/data/splits/ytest.csv
+          if-no-files-found: error
+          retention-days: 7
+
+  model-training:
+    needs: data-prep
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository (full history so the model commit can rebase)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tourism_project/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r tourism_project/requirements.txt
+
+      - name: Download train/test splits
+        uses: actions/download-artifact@v4
+        with:
+          name: data-splits
+          path: tourism_project/data/splits
+
+      - name: Verify downloaded splits
+        run: ls -l tourism_project/data/splits
+
+      - name: Tune, track (local MLflow) and evaluate model
+        run: python tourism_project/model_building/train.py
+
+      - name: Upload MLflow tracking data and evaluation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlflow-tracking-and-reports
+          path: tourism_project/outputs/training/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Commit trained model to main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tourism_project/deployment/model.joblib
+          if git diff --cached --quiet; then
+            echo "Model file unchanged - nothing to commit."
+            exit 0
+          fi
+          git commit -m "Update trained model [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
